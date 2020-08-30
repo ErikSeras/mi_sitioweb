@@ -1,0 +1,177 @@
+---
+title: "Elaboración de mapa de ndvi con tmap"
+author: "Erik Seras"
+date: '2020-08-27'
+slug: elaboración-de-mapa-de-ndvi-con-tmap.es-es
+categories:
+- R
+- Sentinel 2
+tags:
+- rgee
+- leaflet
+- tmap
+keywords: tech
+---
+
+<script src="/rmarkdown-libs/header-attrs/header-attrs.js"></script>
+
+
+<p>Ejemplo de uso de una imagen de Sentinel-2 MSI: MultiSpectral Instrument, Level-2A para generar un mapa estático de NDVI.</p>
+<!--more-->
+<p><a href="https://earth.esa.int/web/sentinel/user-guides/sentinel-2-msi/overview">Sentinel-2</a> es una misión de imágenes multiespectrales de alta resolución que apoya los estudios de monitoreo de tierras de Copérnico, incluyendo el monitoreo de la vegetación, el suelo y la cubierta del agua, así como la observación de vías navegables interiores y áreas costeras.</p>
+<p>Y una de las formas de procesar estos datos satelitales es Google Earth Engine (GEE), una plataforma basada en la nube para el análisis geoespacial a escala planetaria (<a href="https://doi.org/10.1016/j.rse.2017.06.031">Gorelick et al., 2017</a>).</p>
+<p>En el presente ejemplo se presentará algunos pasos que permite la generación de mapas usando directamente los datos del dataset <a href="https://developers.google.com/earth-engine/datasets/catalog/COPERNICUS_S2_SR#description">Sentinel-2 MSI: MultiSpectral Instrument, Level-2A</a> de GEE mediante el lenguaje R y algunos de sus paquetes que permiten tal proceso.</p>
+<p>Para comenzar necesitará tener los <a href="https://drive.google.com/drive/folders/1yDB9oZBS6ZSZ-U1Rf7WsNlLdaHdHl-3z?usp=sharing">archivos</a> del área de interés descagar y ubicarlos en una carpeta dentro de su proyecto. Y se usará los paquetes <a href="https://github.com/r-spatial/rgee"><code>rgee</code></a>, <a href="https://github.com/r-spatial/sf"><code>sf</code></a>, <a href="https://github.com/rspatial/raster"><code>raster</code></a>, <a href="https://github.com/tidyverse/tidyverse"><code>tidyverse</code></a> y <a href="https://github.com/mtennekes/tmap"><code>tmap</code></a>.</p>
+<div id="librerías-necesarias" class="section level2">
+<h2>Librerías necesarias</h2>
+<p>Leer la documentación en github para su adecuada instalación de <code>rgee</code>. Los demás paquetes si se puede instalar normalmente con la función <code>pacman::p_load()</code> si es que no lo tiene con anterioridad.</p>
+<pre class="r"><code>## Carga de librerías
+require(pacman)
+pacman::p_load(
+        rgee, sf, raster, tidyverse, tmap
+)</code></pre>
+</div>
+<div id="inicio-de-sesión-de-google-earth-engine" class="section level2">
+<h2>Inicio de sesión de Google Earth Engine</h2>
+<pre class="r"><code>## Iniciar la sesión de GEE
+rgee::ee_Initialize()</code></pre>
+</div>
+<div id="filtro-de-nube" class="section level2">
+<h2>Filtro de nube</h2>
+<p>El dataset Sentinel-2 MSI: MultiSpectral Instrument, Level-2A ya se encuentran procesadas con <a href="https://step.esa.int/main/third-party-plugins-2/sen2cor/">sen2cor</a>. Solo sería necesario filtrar las nubes.</p>
+<pre class="r"><code>## Código de filtro de nubes
+## https://csaybar.github.io/blog/2020/06/15/rgee_02_io/
+
+getQABits &lt;- function(image, qa) {
+  # Convert decimal (character) to decimal (little endian)
+  qa &lt;- sum(2^(which(rev(unlist(strsplit(as.character(qa), &quot;&quot;)) == 1))-1))
+  # Return a single band image of the extracted QA bits, giving the qa value.
+  image$bitwiseAnd(qa)$lt(1)
+}
+
+s2_clean &lt;- function(img) {
+  # Select only band of interest, for instance, B2,B3,B4,B8
+  img_band_selected &lt;- img$select(&quot;B[2-4|8]&quot;)
+  
+  # quality band
+  ndvi_qa &lt;- img$select(&quot;QA60&quot;)
+
+  # Select pixels to mask
+  quality_mask &lt;- getQABits(ndvi_qa, &quot;110000000000&quot;)
+  
+  # Mask pixels with value zero.
+  img_band_selected$updateMask(quality_mask)
+}</code></pre>
+</div>
+<div id="variables-en-gee" class="section level2">
+<h2>Variables en GEE</h2>
+<pre class="r"><code>## Área de interés
+box &lt;- ee$Geometry$Rectangle(coords = c(-76.97,-12.17,-76.90,-12.10),
+                             ## WGS 84
+                             proj = &quot;EPSG:4326&quot;,
+                             geodesic = FALSE
+)
+
+## Filtrar las nuebes de la imagen seleccionada
+image &lt;- ee$ImageCollection(ee$Image(&quot;COPERNICUS/S2_SR/20191028T151711_20191028T152253_T18LTM&quot;))$
+        map(s2_clean)$first()
+
+## Generar imagen NDVI
+ndvi &lt;- image$normalizedDifference(c(&quot;B8&quot;, &quot;B4&quot;))</code></pre>
+</div>
+<div id="área-de-la-loma" class="section level2">
+<h2>Área de la Loma</h2>
+<p>Cargar el archivo shape descargado.</p>
+<pre class="r"><code>## Dirección de los archivos shape descargados
+datos_mapa &lt;-  &quot;dirección del shape&quot; ## Ejemplo: &quot;data/ACR/ACR.shp&quot;
+
+## Shaoe del área de interés
+loma_shape &lt;- 
+        ## Cambiar la ubicación  en donde usted guardó su archivo shapefile
+        raster::shapefile(datos_mapa) %&gt;% 
+        ## Convertir sp a sf
+        sf::st_as_sf(loma_shape) %&gt;% 
+        ## Obtener el shape de Lomas de Villa María
+        dplyr::filter(acr_codi == &quot;ACR23&quot; &amp; objectid == 2924) %&gt;% 
+        ## UTM 18S
+        sf::st_transform(
+                crs = &quot;+proj=utm +zone=18 +south +ellps=WGS84 +datum=WGS84 +units=m +no_defs&quot;
+        )</code></pre>
+</div>
+<div id="obtención-del-raster-de-ndvi" class="section level2">
+<h2>Obtención del raster de NDVI</h2>
+<p>Guardar en una variable la imagen raster procesada en GEE.</p>
+<pre class="r"><code>## Raster de NDVI del área de interés
+raster_ndvi &lt;- 
+        ## Convertir objeto ee a raster
+        rgee::ee_as_raster(
+        image = ndvi,
+        region = box,
+        scale = 10
+) %&gt;%  
+        ## UTM 18S
+        raster::projectRaster(
+                crs = &quot;+proj=utm +zone=18 +south +ellps=WGS84 +datum=WGS84 +units=m +no_defs&quot;
+        ) %&gt;% 
+        raster::crop(loma_shape) %&gt;% 
+        raster::mask(loma_shape)</code></pre>
+</div>
+<div id="mapa-con-tmap" class="section level2">
+<h2>Mapa con tmap</h2>
+<p>Guardar en una variable el mapa generado.</p>
+<pre class="r"><code>map_ndvi &lt;- tm_shape(raster_ndvi) +
+        ## Características del raster en el mapa
+        tm_raster(style = &quot;fixed&quot;, title = &quot;NDVI&quot;,
+                  palette = c(&quot;#ff0707&quot;,&quot;#fff823&quot;,&quot;#45ff17&quot;,&quot;#13deff&quot;,
+                                &quot;#1d4eff&quot;,&quot;#dc1dff&quot;,&quot;#be3ea8&quot;),
+                  legend.hist = TRUE, n = 6, 
+                  breaks = c(raster::minValue(raster_ndvi), 0.1, 0.2, 0.3, 0.4,
+                             0.5, 0.6, raster::maxValue(raster_ndvi))) +
+        tm_legend(outside = TRUE) +
+        ## Añadir un barra de escala al mapa
+        tm_scale_bar(
+                position = c(&quot;left&quot;, &quot;bottom&quot;), breaks = c(0, 0.5, 1),
+                text.size = 0.7
+        ) +
+        tm_compass(
+                size = 2, position = c(&quot;right&quot;, &quot;top&quot;),
+                type = &quot;4star&quot;
+        ) +
+        ## Añadir los créditos del mapa
+        tm_credits(text = &quot;Poner su nombre&quot;,
+                   size = 0.8, position = c(&quot;right&quot;, &quot;bottom&quot;)) +
+        ## Uso de un estilo predeterminado
+        tm_style(&quot;cobalt&quot;, legend.position = c(&quot;left&quot;,&quot;center&quot;),
+                 legend.format = list(text.separator= &quot;-&quot;)) +
+        ## Arreglos generales del mapa a generar
+        tm_layout(
+                title = &quot;Título del mapa&quot;,
+                title.position = c(&quot;center&quot;, &quot;top&quot;),
+                inner.margins = 0.05
+        )
+
+map_ndvi</code></pre>
+</div>
+<div id="guardar-el-mapa" class="section level2">
+<h2>Guardar el mapa</h2>
+<p>Puede guardar en diferentes formatos los mapas generados.</p>
+<pre class="r"><code>## png
+tmap::tmap_save(
+        tm = map_ndvi,
+        filename = &quot;Nombre de archivo de salida&quot;, ## Ejemplo: &quot;map_ndvi.png&quot;
+        units = &quot;cm&quot;, height = 15, width = 15,
+        dpi = 900
+)
+
+## pdf
+tmap::tmap_save(
+        tm = map_ndvi,
+        filename = &quot;Nombre de archivo de salida&quot;, ## Ejemplo: &quot;map_ndvi.pdf&quot;
+        units = &quot;cm&quot;, height = 15, width = 15,
+        dpi = 900
+)</code></pre>
+<div class="figure">
+<img src="/foo/map_ndvi.png" alt="" />
+<p class="caption">Ejemplo de mapa generado en formato png</p>
+</div>
+</div>
